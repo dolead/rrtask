@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "rrtask"
-version = "0.1.0"
+version = "0.0.2"
 description = "Round Robin Task"
 authors = ["François Schmidts <francois@schmidts.fr>"]
 license = "MIT"
@@ -9,6 +9,10 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "3.7.*"
 celery = "4.4.7"
+redis = "2.10.5"
+pyrabbit = "1.1.0"
+threaded-context = "==1.*"
+blinker = "==1.*"
 
 [tool.poetry.group.dev.dependencies]
 black = "*"
@@ -18,7 +22,12 @@ pylint = "*"
 pycodestyle = "*"
 pytest = "*"
 mypy = "*"
+types-redis = "*"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 79
+target-version = ["py37"]

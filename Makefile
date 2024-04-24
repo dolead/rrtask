@@ -24,6 +24,6 @@ build: clean version
 deploy: test lint build
 	-git tag --delete $(shell poetry version -s) 2> /dev/null
 	git tag $(shell poetry version -s)
-	poetry publish --repository dolead
+	poetry publish
 	git push
 	git push --tags
