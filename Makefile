@@ -2,7 +2,7 @@ RUN=poetry run
 PROJECT_NAME=rrtask
 
 test:
-	$(RUN) pytest tests.py
+	$(RUN) pytest -s tests.py
 
 clean:
 	-rm -rf build dist .coverage test_coverage .mypy_cache .pytest_cache

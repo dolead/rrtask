@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "rrtask"
-version = "0.0.7"
+version = "0.0.8"
 description = "Round Robin Task"
 authors = ["François Schmidts <francois@schmidts.fr>"]
 license = "MIT"
@@ -12,6 +12,7 @@ celery = "==4.4.*"
 redis = "==2.*"
 pyrabbit = "==1.*"
 blinker = "==1.*"
+importlib-metadata = "<5"  # for python3.7
 
 [tool.poetry.group.dev.dependencies]
 black = "*"

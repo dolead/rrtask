@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 class RoundRobinTask:
     shall_loop_in: Optional[Union[float, int]] = None
     _lock_expire = 10 * 60
+    _encoding = "utf8"
 
     def __init__(
         self,
@@ -25,7 +26,7 @@ class RoundRobinTask:
         self._redis = redis
         self._queue_prefix = queue_prefix
 
-        logger.info("Registering %s", self.queue_name)
+        logger.info("[%s] Initializing celery tasks", self.queue_name)
         self._recurring_task = self.__set_recuring_task()
         self._scheduler_task = self.__set_scheduling_task()
 
@@ -58,28 +59,42 @@ class RoundRobinTask:
         )
         return queue_depth == 0
 
-    def is_rescheduling_allowed(self, force: bool = False) -> bool:
-        lock_key = f"{self.queue_name}.lock"
-        if not self._redis.setnx(lock_key, 1):
+    def can_reschedule(self, force: bool = False) -> bool:
+        lock_key = f"rrtask.{self.queue_name}.lock"
+        scheduler_key = f"rrtask.{self.queue_name}.scheduler_id"
+        if not self._redis.setnx(lock_key, 1) and not force:
+            logger.debug("[%s] scheduling forbidden: locked")
             return False
         self._redis.expire(lock_key, self._lock_expire)
         try:
-            uuid = current_task.request.id
+            scheduler_id = current_task.request.id.encode(self._encoding)
         except AttributeError:
-            uuid = None
-        if uuid and self._redis.delete(f"{self.queue_name}.{uuid}"):
-            self._redis.delete(lock_key)
-            return True
-        if force:
-            self._redis.delete(lock_key)
-            return True
-        if self.is_queue_empty:
-            self._redis.delete(lock_key)
-            return True
-        return False
+            scheduler_id = None
+        allowed = True
+        existing_scheduler_id = self._redis.get(scheduler_key)
+        if scheduler_id and existing_scheduler_id == scheduler_id:
+            logger.debug("[%s] can reschedule: matching id", self.queue_name)
+        elif existing_scheduler_id is None:
+            logger.debug(
+                "[%s] can reschedule: no registered scheduler",
+                self.queue_name,
+            )
+        elif force:
+            logger.debug("[%s] can reschedule: forcing", self.queue_name)
+        elif self.is_queue_empty:
+            logger.debug("[%s] can reschedule: empty queue", self.queue_name)
+        else:
+            logger.warning(
+                "[%s] CANNOT reschedule: locked on %r",
+                self.queue_name,
+                existing_scheduler_id,
+            )
+            allowed = False
+        self._redis.delete(lock_key)
+        return allowed
 
     def mark_for_scheduling(self, schedule_id: str):
-        self._redis.set(f"{self.queue_name}.{schedule_id}", 1)
+        self._redis.set(f"rrtask.{self.queue_name}.scheduler_id", schedule_id)
 
     def __set_recuring_task(self):
         task_name = f"{self.queue_name}.recurring_task"
@@ -124,7 +139,7 @@ class RoundRobinTask:
                 "force": force,
             }
             signals.task.send(current_task, status=State.STARTING, **sigload)
-            if not self.is_rescheduling_allowed(force):
+            if not self.can_reschedule(force):
                 status = State.SKIPPED
                 signals.task.send(current_task, status=status, **sigload)
                 return status
@@ -136,9 +151,7 @@ class RoundRobinTask:
             if self.shall_loop_in and params_list:
                 delay_between_task = self.shall_loop_in / task_count
             logger.info(
-                "Scheduling %s for %d params",
-                self.queue_name,
-                task_count,
+                "[%s] Scheduling %d tasks", self.queue_name, task_count
             )
             for i, params in enumerate(params_list):
                 self._recurring_task.apply_async(
@@ -147,7 +160,7 @@ class RoundRobinTask:
                 )
 
             # push yourself
-            logger.info("Rescheduling %s", self.queue_name)
+            logger.info("[%s] Enqueuing scheduler", self.queue_name)
             async_res = self._scheduler_task.apply_async(
                 countdown=self.shall_loop_in or None
             )
@@ -157,5 +170,5 @@ class RoundRobinTask:
 
         return __scheduler_task
 
-    def start(self):
-        self._scheduler_task()
+    def start(self, force: bool = False):
+        self._scheduler_task(force=force)
