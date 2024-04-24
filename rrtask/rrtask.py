@@ -143,10 +143,11 @@ class RoundRobinTask:
 
             # push yourself
             logger.info("Rescheduling %s", self.queue_name)
-            schedule_uuid = str(uuid4())
+            reschedule_id = str(uuid4())
             self._scheduler_task.apply_async(
-                args=[schedule_uuid], countdown=self.shall_loop_in
+                args=[reschedule_id], countdown=self.shall_loop_in
             )
+            self.mark_for_scheduling(task_name, reschedule_id)
             signals.task.send(current_task, status=State.FINISHED, **sigload)
             return State.FINISHED
 
