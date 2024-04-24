@@ -1,17 +1,16 @@
 [tool.poetry]
 name = "rrtask"
-version = "0.0.2"
+version = "0.0.6"
 description = "Round Robin Task"
 authors = ["François Schmidts <francois@schmidts.fr>"]
 license = "MIT"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "3.7.*"
-celery = "4.4.7"
-redis = "2.10.5"
-pyrabbit = "1.1.0"
-threaded-context = "==1.*"
+python = "==3.7.*"
+celery = "==4.4.*"
+redis = "==2.*"
+pyrabbit = "==1.*"
 blinker = "==1.*"
 
 [tool.poetry.group.dev.dependencies]

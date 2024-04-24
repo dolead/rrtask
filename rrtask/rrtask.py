@@ -3,11 +3,12 @@ from datetime import datetime
 from typing import Generator, Optional, Union
 from uuid import uuid4
 
+from redis import Redis
 from celery import Celery, current_task  # type: ignore
 
 from rrtask import signals
 from rrtask.enums import State
-from rrtask.utils import get_rabbitmq_client, get_redis_conn
+from rrtask.utils import get_rabbitmq_client
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,11 @@ class RoundRobinTask:
     def __init__(
         self,
         celery_app: Celery,
-        redis_host: str,
-        redis_db: int = 10,
+        redis: Redis,
         queue_prefix: str = "",
     ):
         self._celery_app = celery_app
-        self._redis_conn = get_redis_conn(redis_host, redis_db)
+        self._redis_conn = redis
         self._queue_prefix = queue_prefix
 
         logger.info("Registering %s", self.queue_name)
