@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "rrtask"
-version = "0.0.6"
+version = "0.0.7"
 description = "Round Robin Task"
 authors = ["François Schmidts <francois@schmidts.fr>"]
 license = "MIT"

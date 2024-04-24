@@ -1,7 +1,5 @@
 import logging
-from datetime import datetime
 from typing import Generator, Optional, Union
-from uuid import uuid4
 
 from redis import Redis
 from celery import Celery, current_task  # type: ignore
@@ -15,15 +13,16 @@ logger = logging.getLogger(__name__)
 
 class RoundRobinTask:
     shall_loop_in: Optional[Union[float, int]] = None
+    _lock_expire = 10 * 60
 
     def __init__(
         self,
-        celery_app: Celery,
+        celery: Celery,
         redis: Redis,
         queue_prefix: str = "",
     ):
-        self._celery_app = celery_app
-        self._redis_conn = redis
+        self._celery = celery
+        self._redis = redis
         self._queue_prefix = queue_prefix
 
         logger.info("Registering %s", self.queue_name)
@@ -42,8 +41,15 @@ class RoundRobinTask:
         """
         raise NotImplementedError("should be overridden")
 
+    @property
+    def queue_name(self):
+        if self._queue_prefix:
+            return f"{self._queue_prefix}.{self.__class__.__name__}"
+        return self.__class__.__name__
+
+    @property
     def is_queue_empty(self) -> int:
-        rabbitmq_conn = self._celery_app.broker_connection()
+        rabbitmq_conn = self._celery.broker_connection()
         rabbitmq_client = get_rabbitmq_client(
             rabbitmq_conn.host, rabbitmq_conn.userid, rabbitmq_conn.password
         )
@@ -52,13 +58,34 @@ class RoundRobinTask:
         )
         return queue_depth == 0
 
+    def is_rescheduling_allowed(self, force: bool = False) -> bool:
+        lock_key = f"{self.queue_name}.lock"
+        if not self._redis.setnx(lock_key, 1):
+            return False
+        self._redis.expire(lock_key, self._lock_expire)
+        try:
+            uuid = current_task.request.id
+        except AttributeError:
+            uuid = None
+        if uuid and self._redis.delete(f"{self.queue_name}.{uuid}"):
+            self._redis.delete(lock_key)
+            return True
+        if force:
+            self._redis.delete(lock_key)
+            return True
+        if self.is_queue_empty:
+            self._redis.delete(lock_key)
+            return True
+        return False
+
+    def mark_for_scheduling(self, schedule_id: str):
+        self._redis.set(f"{self.queue_name}.{schedule_id}", 1)
+
     def __set_recuring_task(self):
         task_name = f"{self.queue_name}.recurring_task"
 
-        @self._celery_app.task(
-            queue=self.queue_name,
-            ignore_result=True,
-            name=task_name,
+        @self._celery.task(
+            queue=self.queue_name, ignore_result=True, name=task_name
         )
         def __recurring_task(**kwd_params):
             sigload = {
@@ -67,59 +94,37 @@ class RoundRobinTask:
                 "task_kwargs": kwd_params,
             }
             signals.task.send(current_task, status=State.STARTING, **sigload)
-            task_state = State.SKIPPED
+            status = State.SKIPPED
             try:
                 result = self.recurring_task(**kwd_params)
                 if isinstance(result, State):
-                    task_state = result
+                    status = result
                 elif result is True:
-                    task_state = State.FINISHED
+                    status = State.FINISHED
+                else:
+                    status = State.UNKNOWN
             except Exception:
-                task_state = State.ERRORED
+                status = State.ERRORED
                 raise
-            signals.task.send(current_task, status=task_state, **sigload)
-            return task_state.value
+            signals.task.send(current_task, status=status, **sigload)
+            return status.value
 
         return __recurring_task
-
-    def is_rescheduling_allowed(
-        self, task_name: str, uuid: Optional[str], force: bool
-    ) -> bool:
-        slot_freed = False
-        if uuid:
-            slot_freed = bool(self._redis_conn.delete(f"{task_name}.{uuid}"))
-            if slot_freed:
-                return True
-        if force:
-            return True
-        if self.is_queue_empty():
-            return True
-        return False
-
-    def mark_for_scheduling(self, task_name: str, uuid: str):
-        self._redis_conn.set(
-            f"{task_name}.{uuid}", datetime.utcnow().isoformat()
-        )
 
     def __set_scheduling_task(self):
         task_name = f"{self.queue_name}.scheduler_task"
 
-        @self._celery_app.task(
-            queue=self.queue_name,
-            ignore_result=True,
-            name=task_name,
+        @self._celery.task(
+            queue=self.queue_name, ignore_result=True, name=task_name
         )
-        def __scheduler_task(
-            schedule_id: Optional[str] = None, force: bool = False
-        ):
+        def __scheduler_task(force: bool = False):
             sigload = {
                 "task_name": task_name,
                 "queue_name": self.queue_name,
-                "schedule_id": schedule_id,
                 "force": force,
             }
             signals.task.send(current_task, status=State.STARTING, **sigload)
-            if not self.is_rescheduling_allowed(task_name, schedule_id, force):
+            if not self.is_rescheduling_allowed(force):
                 status = State.SKIPPED
                 signals.task.send(current_task, status=status, **sigload)
                 return status
@@ -143,18 +148,14 @@ class RoundRobinTask:
 
             # push yourself
             logger.info("Rescheduling %s", self.queue_name)
-            reschedule_id = str(uuid4())
-            self._scheduler_task.apply_async(
-                args=[reschedule_id], countdown=self.shall_loop_in
+            async_res = self._scheduler_task.apply_async(
+                countdown=self.shall_loop_in or None
             )
-            self.mark_for_scheduling(task_name, reschedule_id)
+            self.mark_for_scheduling(async_res.id)
             signals.task.send(current_task, status=State.FINISHED, **sigload)
             return State.FINISHED
 
         return __scheduler_task
 
-    @property
-    def queue_name(self):
-        if self._queue_prefix:
-            return f"{self._queue_prefix}.{self.__class__.__name__}"
-        return self.__class__.__name__
+    def start(self):
+        self._scheduler_task()
