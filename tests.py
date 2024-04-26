@@ -66,4 +66,5 @@ class RRTaskTest(TestCase):
             current_task.request.id = "task id"
             assert self.task.can_reschedule()
         self.redis.set("testing.FavoriteColor.lock", 1)
+        assert not self.task.can_reschedule()
         assert self.task.can_reschedule(force=True)

@@ -3,6 +3,7 @@ from typing import Generator, Optional, Union
 
 from redis import Redis
 from celery import Celery, current_task  # type: ignore
+from pyrabbit.http import HTTPError
 
 from rrtask import signals
 from rrtask.enums import State
@@ -20,7 +21,7 @@ class RoundRobinTask:
         self,
         celery: Celery,
         redis: Redis,
-        queue_prefix: str = "",
+        queue_prefix: Optional[str] = None,
     ):
         self._celery = celery
         self._redis = redis
@@ -44,7 +45,7 @@ class RoundRobinTask:
 
     @property
     def queue_name(self):
-        if self._queue_prefix:
+        if self._queue_prefix is not None:
             return f"{self._queue_prefix}.{self.__class__.__name__}"
         return self.__class__.__name__
 
@@ -54,14 +55,22 @@ class RoundRobinTask:
         rabbitmq_client = get_rabbitmq_client(
             rabbitmq_conn.host, rabbitmq_conn.userid, rabbitmq_conn.password
         )
-        queue_depth = rabbitmq_client.get_queue_depth(
-            rabbitmq_conn.virtual_host, self.queue_name
-        )
+        try:
+            queue_depth = rabbitmq_client.get_queue_depth(
+                rabbitmq_conn.virtual_host, self.queue_name
+            )
+        except HTTPError as error:
+            if getattr(error, "reason", "") == "Object Not Found":
+                return True
+            queue_depth = 1
         return queue_depth == 0
+
+    @property
+    def scheduler_key(self):
+        return f"rrtask.{self.queue_name}.scheduler_id"
 
     def can_reschedule(self, force: bool = False) -> bool:
         lock_key = f"rrtask.{self.queue_name}.lock"
-        scheduler_key = f"rrtask.{self.queue_name}.scheduler_id"
         if not self._redis.setnx(lock_key, 1) and not force:
             logger.debug("[%s] scheduling forbidden: locked")
             return False
@@ -71,7 +80,7 @@ class RoundRobinTask:
         except AttributeError:
             scheduler_id = None
         allowed = True
-        existing_scheduler_id = self._redis.get(scheduler_key)
+        existing_scheduler_id = self._redis.get(self.scheduler_key)
         if scheduler_id and existing_scheduler_id == scheduler_id:
             logger.debug("[%s] can reschedule: matching id", self.queue_name)
         elif existing_scheduler_id is None:
@@ -143,6 +152,7 @@ class RoundRobinTask:
                 status = State.SKIPPED
                 signals.task.send(current_task, status=status, **sigload)
                 return status
+            self._redis.delete(self.scheduler_key)
 
             # Push all other stuff in queue
             params_list = list(self.reschedule_params())
