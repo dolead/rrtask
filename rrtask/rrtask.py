@@ -64,9 +64,9 @@ class RoundRobinTask:
                 broker.virtual_host, self.queue_name
             )
         except HTTPError as error:
-            if getattr(error, "reason", "") == "Object Not Found":
+            if getattr(error, "reason", "") == "Not Found":
                 return True
-            queue_depth = 1
+            raise
         return queue_depth == 0
 
     @property
