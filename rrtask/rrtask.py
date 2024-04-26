@@ -22,10 +22,12 @@ class RoundRobinTask:
         celery: Celery,
         redis: Redis,
         queue_prefix: Optional[str] = None,
+        celery_http_api_port: int = 15672,
     ):
         self._celery = celery
         self._redis = redis
         self._queue_prefix = queue_prefix
+        self._celery_port = celery_http_api_port
 
         logger.info("[%s] Initializing celery tasks", self.queue_name)
         self._recurring_task = self.__set_recuring_task()
@@ -53,7 +55,9 @@ class RoundRobinTask:
     def is_queue_empty(self) -> int:
         broker = self._celery.broker_connection()
         rabbitmq_client = get_rabbitmq_client(
-            broker.hostname, broker.userid, broker.password
+            f"{broker.hostname}:{self._celery_port}",
+            broker.userid,
+            broker.password,
         )
         try:
             queue_depth = rabbitmq_client.get_queue_depth(
