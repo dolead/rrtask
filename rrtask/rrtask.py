@@ -184,5 +184,8 @@ class RoundRobinTask:
 
         return __scheduler_task
 
-    def start(self, force: bool = False):
-        self._scheduler_task(force=force)
+    def start(self, force: bool = False, delay: bool = False):
+        if delay:
+            self._scheduler_task.delay(force=force)
+        else:
+            self._scheduler_task(force=force)
