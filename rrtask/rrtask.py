@@ -3,7 +3,7 @@ from typing import Generator, Optional, Union
 
 from redis import Redis
 from celery import Celery, current_task  # type: ignore
-from pyrabbit.http import HTTPError
+from pyrabbit.http import HTTPError  # type: ignore
 
 from rrtask import signals
 from rrtask.enums import State
@@ -51,13 +51,13 @@ class RoundRobinTask:
 
     @property
     def is_queue_empty(self) -> int:
-        rabbitmq_conn = self._celery.broker_connection()
+        broker = self._celery.broker_connection()
         rabbitmq_client = get_rabbitmq_client(
-            rabbitmq_conn.host, rabbitmq_conn.userid, rabbitmq_conn.password
+            broker.hostname, broker.userid, broker.password
         )
         try:
             queue_depth = rabbitmq_client.get_queue_depth(
-                rabbitmq_conn.virtual_host, self.queue_name
+                broker.virtual_host, self.queue_name
             )
         except HTTPError as error:
             if getattr(error, "reason", "") == "Object Not Found":
