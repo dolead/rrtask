@@ -6,7 +6,7 @@ from celery import Celery, current_task  # type: ignore
 from pyrabbit.http import HTTPError  # type: ignore
 
 from rrtask import signals
-from rrtask.enums import State
+from rrtask.enums import State, Routing
 from rrtask.utils import get_rabbitmq_client
 
 logger = logging.getLogger(__name__)
@@ -23,11 +23,13 @@ class RoundRobinTask:
         redis: Redis,
         queue_prefix: Optional[str] = None,
         celery_http_api_port: int = 15672,
+        routing_via=Routing.QUEUE_NAME,
     ):
         self._celery = celery
         self._redis = redis
         self._queue_prefix = queue_prefix
         self._celery_port = celery_http_api_port
+        self._routing_via = routing_via
 
         logger.info("[%s] Initializing celery tasks", self.queue_name)
         self._recurring_task = self.__set_recuring_task()
@@ -111,10 +113,11 @@ class RoundRobinTask:
 
     def __set_recuring_task(self):
         task_name = f"{self.queue_name}.recurring_task"
+        task_kwargs = {"ignore_result": True, "name": task_name}
+        if self._routing_via is Routing.QUEUE_NAME:
+            task_kwargs["queue"] = self.queue_name
 
-        @self._celery.task(
-            queue=self.queue_name, ignore_result=True, name=task_name
-        )
+        @self._celery.task(**task_kwargs)
         def __recurring_task(**kwd_params):
             sigload = {
                 "task_name": task_name,
@@ -142,9 +145,14 @@ class RoundRobinTask:
     def __set_scheduling_task(self):
         task_name = f"{self.queue_name}.scheduler_task"
 
-        @self._celery.task(
-            queue=self.queue_name, ignore_result=True, name=task_name
-        )
+        task_kwargs = {"ignore_result": True, "name": task_name}
+        apply_kwargs = {}
+        if self._routing_via is Routing.QUEUE_NAME:
+            task_kwargs["queue"] = self.queue_name
+        elif self._routing_via is Routing.ROUTING_KEY:
+            apply_kwargs["routing_key"] = f"{self.queue_name}.rrtask"
+
+        @self._celery.task(**task_kwargs)
         def __scheduler_task(force: bool = False):
             sigload = {
                 "task_name": task_name,
@@ -171,12 +179,14 @@ class RoundRobinTask:
                 self._recurring_task.apply_async(
                     kwargs=params,
                     countdown=int(i * delay_between_task) or None,
+                    **apply_kwargs,
                 )
 
             # push yourself
             logger.info("[%s] Enqueuing scheduler", self.queue_name)
             async_res = self._scheduler_task.apply_async(
-                countdown=self.shall_loop_in or None
+                countdown=self.shall_loop_in or None,
+                **apply_kwargs,
             )
             self.mark_for_scheduling(async_res.id)
             signals.task.send(current_task, status=State.FINISHED, **sigload)
@@ -185,7 +195,14 @@ class RoundRobinTask:
         return __scheduler_task
 
     def start(self, force: bool = False, delay: bool = False):
+        apply_kwargs = {}
+        if self._routing_via is Routing.QUEUE_NAME:
+            apply_kwargs["queue"] = self.queue_name
+        elif self._routing_via is Routing.ROUTING_KEY:
+            apply_kwargs["routing_key"] = f"{self.queue_name}.rrtask"
         if delay:
-            self._scheduler_task.delay(force=force)
+            self._scheduler_task.apply_async(
+                kwargs={"force": force}, **apply_kwargs
+            )
         else:
             self._scheduler_task(force=force)
