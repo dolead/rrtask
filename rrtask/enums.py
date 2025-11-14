@@ -8,3 +8,8 @@ class State(Enum):
     ERRORED = "ERRORED"
     SKIPPED = "SKIPPED"
     FINISHED = "FINISHED"
+
+
+class Routing:
+    QUEUE_NAME = "QUEUE_NAME"
+    ROUTING_KEY = "ROUTING_KEY"
