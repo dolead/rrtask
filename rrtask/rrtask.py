@@ -150,7 +150,8 @@ class RoundRobinTask:
         if self._routing_via is Routing.QUEUE_NAME:
             task_kwargs["queue"] = self.queue_name
         elif self._routing_via is Routing.ROUTING_KEY:
-            apply_kwargs["declaire"] = []
+            apply_kwargs["declare"] = []
+            apply_kwargs["exchange"] = self._celery.conf.task_default_exchange
             apply_kwargs["routing_key"] = self.queue_name
 
         @self._celery.task(**task_kwargs)
@@ -200,7 +201,8 @@ class RoundRobinTask:
         if self._routing_via is Routing.QUEUE_NAME:
             apply_kwargs["queue"] = self.queue_name
         elif self._routing_via is Routing.ROUTING_KEY:
-            apply_kwargs["declaire"] = []
+            apply_kwargs["declare"] = []
+            apply_kwargs["exchange"] = self._celery.conf.task_default_exchange
             apply_kwargs["routing_key"] = self.queue_name
         if delay:
             self._scheduler_task.apply_async(
