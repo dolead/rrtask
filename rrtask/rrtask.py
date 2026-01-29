@@ -77,7 +77,7 @@ class RoundRobinTask:
     def can_reschedule(self, force: bool = False) -> bool:
         lock_key = f"rrtask.{self.queue_name}.lock"
         if not self._redis.setnx(lock_key, 1) and not force:
-            logger.debug("[%s] scheduling forbidden: locked")
+            logger.debug("[%s] scheduling forbidden: locked", self.queue_name)
             return False
         self._redis.expire(lock_key, self._lock_expire)
         try:
