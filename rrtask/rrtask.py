@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 class RoundRobinTask:
     shall_loop_in: Optional[Union[float, int]] = None
     celery_http_api_port: int = 15672
-    _lock_expire = 10 * 60
+    # The lock only guards the (tiny) generation read-modify-write, so a
+    # short expiry is enough and bounds how long a crashed holder can
+    # stall rescheduling.
+    _lock_expire = 60
     _encoding = "utf8"
 
     def __init__(
@@ -71,44 +74,68 @@ class RoundRobinTask:
         return queue_depth == 0
 
     @property
-    def scheduler_key(self):
-        return f"rrtask.{self.queue_name}.scheduler_id"
+    def _generation_key(self):
+        return f"rrtask.{self.queue_name}.generation"
 
-    def can_reschedule(self, force: bool = False) -> bool:
-        lock_key = f"rrtask.{self.queue_name}.lock"
-        if not self._redis.setnx(lock_key, 1) and not force:
-            logger.debug("[%s] scheduling forbidden: locked", self.queue_name)
-            return False
-        self._redis.expire(lock_key, self._lock_expire)
+    @property
+    def _lock_key(self):
+        return f"rrtask.{self.queue_name}.lock"
+
+    def _claim_next_generation(
+        self, current_generation: Optional[int], force: bool
+    ) -> Optional[int]:
+        """Decide whether the calling scheduler may reschedule and, if so,
+        reserve the next generation token.
+
+        Deduplication does NOT depend on queue emptiness. Every scheduler
+        is stamped with the generation it was scheduled under; only the
+        holder of the currently live generation (or a forced/bootstrap
+        start) may advance the counter. Stale duplicates fail the compare
+        and skip, so forks collapse deterministically instead of being
+        allowed to survive and multiply whenever the broker reports an
+        (apparently) empty queue -- which it always does while the chain's
+        tasks are held by workers as countdown/ETA jobs.
+
+        Returns the freshly reserved generation, or None when the caller
+        is a stale duplicate and must skip.
+        """
+        # Serialize the read-modify-write so two concurrent schedulers
+        # carrying the same generation cannot both claim and fork.
+        if not self._redis.setnx(self._lock_key, 1):
+            logger.debug("[%s] claim skipped: busy", self.queue_name)
+            return None
+        self._redis.expire(self._lock_key, self._lock_expire)
         try:
-            scheduler_id = current_task.request.id.encode(self._encoding)
-        except AttributeError:
-            scheduler_id = None
-        allowed = True
-        existing_scheduler_id = self._redis.get(self.scheduler_key)
-        if scheduler_id and existing_scheduler_id == scheduler_id:
-            logger.debug("[%s] can reschedule: matching id", self.queue_name)
-        elif existing_scheduler_id is None:
+            registered = self._redis.get(self._generation_key)
+            if registered is not None:
+                registered = int(registered)
+            if force:
+                reason = "forcing"
+            elif registered is None:
+                reason = "no live chain"
+            elif (
+                current_generation is not None
+                and current_generation == registered
+            ):
+                reason = "live chain"
+            else:
+                logger.warning(
+                    "[%s] CANNOT reschedule: stale generation %r (live %r)",
+                    self.queue_name,
+                    current_generation,
+                    registered,
+                )
+                return None
+            next_generation = self._redis.incr(self._generation_key)
             logger.debug(
-                "[%s] can reschedule: no registered scheduler",
+                "[%s] claimed generation %d (%s)",
                 self.queue_name,
+                next_generation,
+                reason,
             )
-        elif force:
-            logger.debug("[%s] can reschedule: forcing", self.queue_name)
-        elif self.is_queue_empty:
-            logger.debug("[%s] can reschedule: empty queue", self.queue_name)
-        else:
-            logger.warning(
-                "[%s] CANNOT reschedule: locked on %r",
-                self.queue_name,
-                existing_scheduler_id,
-            )
-            allowed = False
-        self._redis.delete(lock_key)
-        return allowed
-
-    def mark_for_scheduling(self, schedule_id: str):
-        self._redis.set(f"rrtask.{self.queue_name}.scheduler_id", schedule_id)
+            return next_generation
+        finally:
+            self._redis.delete(self._lock_key)
 
     def __set_recuring_task(self):
         task_name = f"{self.queue_name}.recurring_task"
@@ -154,18 +181,31 @@ class RoundRobinTask:
             apply_kwargs["routing_key"] = self.queue_name
 
         @self._celery.task(**task_kwargs)
-        def __scheduler_task(force: bool = False):
+        def __scheduler_task(
+            generation: Optional[int] = None, force: bool = False
+        ):
             sigload = {
                 "task_name": task_name,
                 "queue_name": self.queue_name,
                 "force": force,
             }
             signals.task.send(current_task, status=State.STARTING, **sigload)
-            if not self.can_reschedule(force):
+            next_generation = self._claim_next_generation(generation, force)
+            if next_generation is None:
                 status = State.SKIPPED
                 signals.task.send(current_task, status=status, **sigload)
                 return status
-            self._redis.delete(self.scheduler_key)
+
+            # Secure chain continuity FIRST: enqueue our successor stamped
+            # with the freshly claimed generation before the (potentially
+            # large) fan-out, so a failure while building/queuing the batch
+            # cannot leave the chain without a successor and kill it.
+            logger.info("[%s] Enqueuing scheduler", self.queue_name)
+            self._scheduler_task.apply_async(
+                kwargs={"generation": next_generation},
+                countdown=self.shall_loop_in or None,
+                **apply_kwargs,
+            )
 
             # Push all other stuff in queue
             params_list = list(self.reschedule_params())
@@ -183,13 +223,6 @@ class RoundRobinTask:
                     **apply_kwargs,
                 )
 
-            # push yourself
-            logger.info("[%s] Enqueuing scheduler", self.queue_name)
-            async_res = self._scheduler_task.apply_async(
-                countdown=self.shall_loop_in or None,
-                **apply_kwargs,
-            )
-            self.mark_for_scheduling(async_res.id)
             signals.task.send(current_task, status=State.FINISHED, **sigload)
             return State.FINISHED
 
