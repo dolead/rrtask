@@ -12,7 +12,7 @@ class Redis:
     def get(self, key):
         return self._bdd.get(key)
 
-    def set(self, key, value):
+    def set(self, key, value, ex=None):
         self._bdd[key] = str(value).encode("utf8")
 
     def setnx(self, key, value):
@@ -50,9 +50,6 @@ class FavoriteColor(rrtask.RoundRobinTask):
 
 class RRTaskTest(TestCase):
     def setUp(self):
-        rabbitmq_client_patch = mock.patch("rrtask.rrtask.get_rabbitmq_client")
-        self.rabbitmq_client = rabbitmq_client_patch.start()
-        self.rabbitmq_client.get_queue_depth.return_value = 0
         self.redis = Redis()
         self.celery = mock.Mock()
         self.task = FavoriteColor(self.celery, self.redis, "testing")
@@ -76,6 +73,26 @@ class RRTaskTest(TestCase):
         assert task._claim_next_generation(3, force=False) is None
         # ...while the forced chain (gen 4) continues normally.
         assert task._claim_next_generation(4, force=False) == 5
+
+    def test_heartbeat_liveness(self):
+        task = self.task
+        # No task has run yet -> looks dead -> watchdog may (re)start it.
+        assert task.is_queue_empty
+        # Any task refreshing the heartbeat marks the chain alive.
+        task._beat()
+        assert not task.is_queue_empty
+
+    def test_heartbeat_ttl_tracks_cadence(self):
+        task = self.task
+        # No shall_loop_in -> fall back to the floor.
+        assert task._compute_heartbeat_ttl(10) == task._heartbeat_min_ttl
+        task.shall_loop_in = 3600
+        # spacing = 3600 / 10 = 360s, padded by the 1.1 margin.
+        assert task._compute_heartbeat_ttl(10) == 396
+        # Busy queue: spacing dips below the floor and is clamped up.
+        assert task._compute_heartbeat_ttl(100000) == task._heartbeat_min_ttl
+        # Empty batch must not divide by zero.
+        assert task._compute_heartbeat_ttl(0) == int(3600 * 1.1)
 
     def test_claim_serialized_by_lock(self):
         task = self.task
