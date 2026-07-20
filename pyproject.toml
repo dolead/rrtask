@@ -1,6 +1,6 @@
 [project]
 name = "rrtask"
-version = "3.0.0a0"
+version = "3.0.0"
 description = "Round Robin Task"
 author = { name = "François Schmidts", email = "francois@schmidts.fr" }
 license = "MIT"
