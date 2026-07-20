@@ -1,11 +1,11 @@
 import logging
 from typing import Generator, Optional, Union
 
-from redis import Redis
 from celery import Celery, current_task  # type: ignore
+from redis import Redis
 
 from rrtask import signals
-from rrtask.enums import State, Routing
+from rrtask.enums import Routing, State
 
 logger = logging.getLogger(__name__)
 

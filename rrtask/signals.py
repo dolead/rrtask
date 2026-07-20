@@ -1,5 +1,7 @@
 import logging
+
 from blinker import signal  # type: ignore
+
 from rrtask.enums import State
 
 logger = logging.getLogger(__name__)
